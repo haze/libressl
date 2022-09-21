@@ -536,6 +536,7 @@ pub fn createLibCryptoStep(
     raw_libcrypto_step.strip = true;
     raw_libcrypto_step.setTarget(target);
     raw_libcrypto_step.setBuildMode(mode);
+    raw_libcrypto_step.linkLibC();
     const libcrypto = DeferredLibExeObjStep.init(builder, raw_libcrypto_step, c_function_dependency_step);
 
     const raw_libcrypto_base_sources = [_][]const u8{
@@ -1244,6 +1245,7 @@ pub fn createLibSslStep(
     raw_libssl_step.strip = true;
     raw_libssl_step.setTarget(target);
     raw_libssl_step.setBuildMode(mode);
+    raw_libssl_step.linkLibC();
     const libssl = DeferredLibExeObjStep.init(builder, raw_libssl_step, c_function_dependency_step);
 
     const raw_lib_ssl_source_files = [_][]const u8{
@@ -1335,6 +1337,7 @@ pub fn createLibTlsStep(
     raw_libtls_step.strip = true;
     raw_libtls_step.setTarget(target);
     raw_libtls_step.setBuildMode(mode);
+    raw_libtls_step.linkLibC();
     const libtls = DeferredLibExeObjStep.init(builder, raw_libtls_step, c_function_dependency_step);
 
     const raw_lib_tls_source_files = [_][]const u8{
