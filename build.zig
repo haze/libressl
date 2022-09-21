@@ -393,8 +393,8 @@ const HasCFunctionStep = struct {
             c_function_test_path,
         }) catch unreachable;
 
-        // const command = std.mem.join(has_c_function_step.builder.allocator, " ", compile_command.items) catch unreachable;
-        // out.info("Running '{s}'", .{command});
+        const command = std.mem.join(has_c_function_step.builder.allocator, " ", compile_command.items) catch unreachable;
+        out.info("Running '{s}'", .{command});
 
         const compile_command_result = try std.ChildProcess.exec(.{
             .allocator = has_c_function_step.builder.allocator,
@@ -404,7 +404,7 @@ const HasCFunctionStep = struct {
         // out.info("{s}", .{compile_command_result.stderr});
         // out.info("{}", .{compile_command_result.term});
 
-        const compiled_successfully = compile_command_result.term == .Exited and (compile_command_result.term.Exited == 0 or compile_command_result.term.Exited == 1);
+        const compiled_successfully = compile_command_result.term == .Exited and compile_command_result.term.Exited == 0;
         has_c_function_step.on_determine_fn(has_c_function_step.c_function_dependency_step, compiled_successfully, has_c_function_step.on_determine_fn_context);
     }
 
