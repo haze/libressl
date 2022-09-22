@@ -210,6 +210,32 @@ const CFunctionDependencyStep = struct {
         dependency_step.c_include_directories = std.ArrayList([]const u8).init(builder.allocator);
         dependency_step.c_function_dependencies = c_function_dependencies;
 
+        switch (target.getOsTag()) {
+            .macos => dependency_step.c_flags.append("-fno-common") catch unreachable,
+            .openbsd => dependency_step.c_flags.appendSlice(&[_][]const u8{
+                "-DHAVE_ATTRIBUTE__BOUNDED__",
+                "-DHAVE_ATTRIBUTE__DEAD__",
+            }) catch unreachable,
+            .linux => dependency_step.c_flags.appendSlice(&[_][]const u8{
+                "-D_DEFAULT_SOURCE",
+                "-D_BSD_SOURCE",
+                "-D_POSIX_SOURCE",
+                "-D_GNU_SOURCE",
+            }) catch unreachable,
+            .windows => dependency_step.c_flags.appendSlice(&[_][]const u8{
+                "-D_POSIX_SOURCE",
+                "-D__USE_MINGW_ANSI_STDIO",
+                "-D_POSIX",
+                "-D_GNU_SOURCE",
+            }) catch unreachable,
+            else => {},
+        }
+
+        dependency_step.c_flags.appendSlice(&[_][]const u8{
+            "-O2",
+            "-Wall",
+        }) catch unreachable;
+
         return dependency_step;
     }
 
@@ -404,7 +430,7 @@ const HasCFunctionStep = struct {
         // out.info("{s}", .{compile_command_result.stderr});
         // out.info("{}", .{compile_command_result.term});
 
-        const compiled_successfully = compile_command_result.term == .Exited and compile_command_result.term.Exited == 0;
+        const compiled_successfully = compile_command_result.term == .Exited and (compile_command_result.term.Exited == 0 or (compile_command_result.term.Exited == 1 and std.mem.indexOf(u8, compile_command_result.stderr, "conflicting types") != null));
         has_c_function_step.on_determine_fn(has_c_function_step.c_function_dependency_step, compiled_successfully, has_c_function_step.on_determine_fn_context);
     }
 
