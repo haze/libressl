@@ -3,10 +3,24 @@
 const std = @import("std");
 const out = std.log.scoped(.libressl_build);
 
-pub const CIncludeDependencies = [_][]const []const u8{
-    [_][]const u8{"endian.h"},
-    [_][]const u8{"err.h"},
-    [_][]const u8{ "sys/types.h", "arpa/inet.h", "netinet/ip.h" },
+const CIncludeDependencyBundle = struct {
+    headers: []const []const u8,
+    c_flag: []const u8,
+};
+
+pub const CIncludeDependencies = [_]CIncludeDependencyBundle{
+    .{
+        .headers = &[_][]const u8{"endian.h"},
+        .c_flag = "HAVE_ENDIAN_H",
+    },
+    .{
+        .headers = &[_][]const u8{"err.h"},
+        .c_flag = "HAVE_ERR_H",
+    },
+    .{
+        .headers = &[_][]const u8{ "sys/types.h", "arpa/inet.h", "netinet/ip.h" },
+        .c_flag = "HAVE_NETINET_IP_H",
+    },
 };
 
 // Mapping from Target to CBackupSourceFiles
@@ -138,8 +152,8 @@ pub const CFunctionDependencyDarwinBackupSourceFiles = struct {
     const getentropy = [_][]const u8{"crypto/compat/getentropy_osx.c"};
 };
 
-/// Check the target for specific c functions
-const CFunctionDependencyStep = struct {
+/// Check the target for specific c functions and includes
+const WideCDependencyStep = struct {
     const DependencyInfo = struct {
         maybe_target_has_symbol: ?bool,
         symbol_has_backup: bool = false,
@@ -154,19 +168,25 @@ const CFunctionDependencyStep = struct {
     step: std.build.Step,
     builder: *std.build.Builder,
     c_function_dependencies: []const CFunctionDependency,
+    c_include_dependencies: []const CIncludeDependencyBundle,
 
-    pub fn init(builder: *std.build.Builder, comptime c_function_dependencies: []const CFunctionDependency, target: std.zig.CrossTarget) *CFunctionDependencyStep {
-        const dependency_step = builder.allocator.create(CFunctionDependencyStep) catch unreachable;
+    pub fn init(
+        builder: *std.build.Builder,
+        comptime c_function_dependencies: []const CFunctionDependency,
+        c_include_dependencies: []const CIncludeDependencyBundle,
+        target: std.zig.CrossTarget,
+    ) *WideCDependencyStep {
+        const dependency_step = builder.allocator.create(WideCDependencyStep) catch unreachable;
 
         dependency_step.step = std.build.Step.init(
             .custom,
             @typeName(@This()),
             builder.allocator,
-            CFunctionDependencyStep.make,
+            WideCDependencyStep.make,
         );
 
         inline for (c_function_dependencies) |c_function_dependency| {
-            HasCFunctionStep.addFunctionAsDependencyToStepWithBackupSource(
+            CDependencyTestStep.addFunctionAsDependencyToStepWithBackupSource(
                 builder,
                 target,
                 dependency_step,
@@ -202,6 +222,10 @@ const CFunctionDependencyStep = struct {
             );
         }
 
+        for (c_include_dependencies) |dependency_bundle| {
+            CDependencyTestStep.addIncludesAsDependencyToStep(builder, target, dependency_step, dependency_bundle);
+        }
+
         dependency_step.c_function_dependency_map = std.EnumMap(CFunctionDependency, DependencyInfo).initFull(DependencyInfo{
             .maybe_target_has_symbol = null,
         });
@@ -209,6 +233,7 @@ const CFunctionDependencyStep = struct {
         dependency_step.c_source_files = std.ArrayList([]const u8).init(builder.allocator);
         dependency_step.c_include_directories = std.ArrayList([]const u8).init(builder.allocator);
         dependency_step.c_function_dependencies = c_function_dependencies;
+        dependency_step.c_include_dependencies = c_include_dependencies;
 
         switch (target.getOsTag()) {
             .macos => dependency_step.c_flags.append("-fno-common") catch unreachable,
@@ -256,7 +281,7 @@ const DeferredLibExeObjStep = struct {
     c_source_files: std.ArrayList([]const u8),
     c_flags: std.ArrayList([]const u8),
 
-    c_function_dependency_step: *CFunctionDependencyStep,
+    c_function_dependency_step: *WideCDependencyStep,
 
     pub fn debugDependencyMap(deferred_step: *DeferredLibExeObjStep) void {
         var iterator = deferred_step.c_function_dependency_map.iterator();
@@ -268,7 +293,7 @@ const DeferredLibExeObjStep = struct {
     pub fn init(
         builder: *std.build.Builder,
         lib_exe_obj_step: *std.build.LibExeObjStep,
-        c_function_dependency_step: *CFunctionDependencyStep,
+        c_function_dependency_step: *WideCDependencyStep,
     ) *DeferredLibExeObjStep {
         const deferred_step = builder.allocator.create(DeferredLibExeObjStep) catch unreachable;
 
@@ -330,8 +355,8 @@ const DeferredLibExeObjStep = struct {
 };
 
 /// Spawns a child `zig cc` process that checks whether or not the build target
-/// has access to a certain c function
-const HasCFunctionStep = struct {
+/// has access to a certain c function or include
+const CDependencyTestStep = struct {
     // hijacked from CMake source (CheckFunctionExists.c)
     const template_c_source =
         \\char {s}(void);
@@ -343,16 +368,19 @@ const HasCFunctionStep = struct {
         \\  return 0;
         \\}}
     ;
+    const no_function_template_c_source =
+        \\int main(void){return 0;}
+    ;
 
-    const OnDetermineIfFunctionExistsFn = std.meta.FnPtr(fn (*CFunctionDependencyStep, bool, *anyopaque) void);
+    const OnDetermineIfFunctionExistsFn = std.meta.FnPtr(fn (*WideCDependencyStep, bool, *anyopaque) void);
 
     step: std.build.Step,
-    c_function_dependency_step: *CFunctionDependencyStep,
+    c_function_dependency_step: *WideCDependencyStep,
     rich_step: *DeferredLibExeObjStep,
     builder: *std.build.Builder,
     target: std.zig.CrossTarget,
 
-    function: CFunctionDependency,
+    maybe_function: ?CFunctionDependency,
     maybe_include_header_files: ?[]const []const u8 = null,
 
     on_determine_fn: OnDetermineIfFunctionExistsFn,
@@ -361,14 +389,15 @@ const HasCFunctionStep = struct {
     pub fn init(
         builder: *std.build.Builder,
         target: std.zig.CrossTarget,
-        function: CFunctionDependency,
+        maybe_function: ?CFunctionDependency,
         maybe_include_header_files: ?[]const []const u8,
-        c_function_dependency_step: *CFunctionDependencyStep,
+        c_function_dependency_step: *WideCDependencyStep,
         on_determine_fn: OnDetermineIfFunctionExistsFn,
         on_determine_fn_context: *anyopaque,
-    ) *HasCFunctionStep {
-        var step = builder.allocator.create(HasCFunctionStep) catch unreachable;
-        step.function = function;
+    ) *CDependencyTestStep {
+        std.debug.assert(maybe_function != null or maybe_include_header_files != null);
+        var step = builder.allocator.create(CDependencyTestStep) catch unreachable;
+        step.maybe_function = maybe_function;
         step.maybe_include_header_files = maybe_include_header_files;
 
         step.builder = builder;
@@ -378,52 +407,93 @@ const HasCFunctionStep = struct {
         step.c_function_dependency_step = c_function_dependency_step;
         step.step = std.build.Step.init(
             .custom,
-            std.fmt.allocPrint(builder.allocator, "has-{s}", .{@tagName(function)}) catch unreachable,
+            if (maybe_function) |function|
+                std.fmt.allocPrint(builder.allocator, "has-{s}", .{@tagName(function)}) catch unreachable
+            else if (maybe_include_header_files) |include_header_files| blk: {
+                var header_names = std.mem.join(builder.allocator, "-", include_header_files) catch unreachable;
+                break :blk std.fmt.allocPrint(builder.allocator, "has-{s}", .{header_names}) catch unreachable;
+            } else unreachable,
             builder.allocator,
-            HasCFunctionStep.make,
+            CDependencyTestStep.make,
         );
         return step;
     }
 
-    pub fn make(step: *std.build.Step) anyerror!void {
-        const has_c_function_step: *HasCFunctionStep = @fieldParentPtr(HasCFunctionStep, "step", step);
-        const have_function_root_path = try std.fs.path.join(has_c_function_step.builder.allocator, &[_][]const u8{
-            has_c_function_step.builder.cache_root,
-            "function_checks",
+    fn checkIfIncludesExist(c_dependency_step: *CDependencyTestStep, include_headers: []const []const u8, c_checks_root_path: []const u8) anyerror!void {
+        var safe_header_name_list = std.ArrayList(u8).init(c_dependency_step.builder.allocator);
+        for (include_headers) |header| {
+            var output_header: [128]u8 = undefined;
+            const safe_header_length = std.mem.replace(u8, header, std.fs.path.sep_str, "_", &output_header);
+            try safe_header_name_list.appendSlice(output_header[0..safe_header_length]);
+        }
+
+        const c_function_test_path = try std.fs.path.join(c_dependency_step.builder.allocator, &[_][]const u8{
+            c_checks_root_path,
+            try std.fmt.allocPrint(c_dependency_step.builder.allocator, "has-{s}.c", .{safe_header_name_list.items}),
         });
-        std.fs.cwd().makeDir(have_function_root_path) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-        const c_function_test_path = try std.fs.path.join(has_c_function_step.builder.allocator, &[_][]const u8{
-            have_function_root_path,
-            try std.fmt.allocPrint(has_c_function_step.builder.allocator, "has-{s}.c", .{@tagName(has_c_function_step.function)}),
+        out.info("Creating {s}...", .{c_function_test_path});
+        var file = try std.fs.cwd().createFile(c_function_test_path, .{});
+        var file_writer = file.writer();
+
+        for (include_headers) |include_path| {
+            try file_writer.print("#include <{s}>\n", .{include_path});
+        }
+        try file_writer.writeAll(CDependencyTestStep.no_function_template_c_source);
+
+        var compile_command = std.ArrayList([]const u8).init(c_dependency_step.builder.allocator);
+        compile_command.appendSlice(&[_][]const u8{
+            c_dependency_step.builder.zig_exe,
+            "cc",
+            "-target",
+            c_dependency_step.target.linuxTriple(c_dependency_step.builder.allocator) catch unreachable,
+            c_function_test_path,
+        }) catch unreachable;
+
+        const command = std.mem.join(c_dependency_step.builder.allocator, " ", compile_command.items) catch unreachable;
+        out.info("Running '{s}'", .{command});
+
+        const compile_command_result = try std.ChildProcess.exec(.{
+            .allocator = c_dependency_step.builder.allocator,
+            .argv = compile_command.items,
+        });
+
+        // out.info("{s}", .{compile_command_result.stderr});
+        // out.info("{}", .{compile_command_result.term});
+
+        const compiled_successfully = compile_command_result.term == .Exited and compile_command_result.term.Exited == 0;
+        c_dependency_step.on_determine_fn(c_dependency_step.c_function_dependency_step, compiled_successfully, c_dependency_step.on_determine_fn_context);
+    }
+
+    fn checkIfFunctionExists(c_dependency_step: *CDependencyTestStep, function: CFunctionDependency, c_checks_root_path: []const u8) anyerror!void {
+        const c_function_test_path = try std.fs.path.join(c_dependency_step.builder.allocator, &[_][]const u8{
+            c_checks_root_path,
+            try std.fmt.allocPrint(c_dependency_step.builder.allocator, "has-{s}.c", .{@tagName(function)}),
         });
         var file = try std.fs.cwd().createFile(c_function_test_path, .{});
         var file_writer = file.writer();
 
-        if (has_c_function_step.maybe_include_header_files) |header_files| {
+        if (c_dependency_step.maybe_include_header_files) |header_files| {
             for (header_files) |include_path| {
                 try file_writer.print("#include <{s}>\n", .{include_path});
             }
         }
 
-        try file_writer.print(template_c_source, .{ @tagName(has_c_function_step.function), @tagName(has_c_function_step.function) });
+        try file_writer.print(template_c_source, .{ @tagName(function), @tagName(function) });
 
-        var compile_command = std.ArrayList([]const u8).init(has_c_function_step.builder.allocator);
+        var compile_command = std.ArrayList([]const u8).init(c_dependency_step.builder.allocator);
         compile_command.appendSlice(&[_][]const u8{
-            has_c_function_step.builder.zig_exe,
+            c_dependency_step.builder.zig_exe,
             "cc",
             "-target",
-            has_c_function_step.target.linuxTriple(has_c_function_step.builder.allocator) catch unreachable,
+            c_dependency_step.target.linuxTriple(c_dependency_step.builder.allocator) catch unreachable,
             c_function_test_path,
         }) catch unreachable;
 
-        const command = std.mem.join(has_c_function_step.builder.allocator, " ", compile_command.items) catch unreachable;
+        const command = std.mem.join(c_dependency_step.builder.allocator, " ", compile_command.items) catch unreachable;
         out.info("Running '{s}'", .{command});
 
         const compile_command_result = try std.ChildProcess.exec(.{
-            .allocator = has_c_function_step.builder.allocator,
+            .allocator = c_dependency_step.builder.allocator,
             .argv = compile_command.items,
         });
 
@@ -431,13 +501,31 @@ const HasCFunctionStep = struct {
         // out.info("{}", .{compile_command_result.term});
 
         const compiled_successfully = compile_command_result.term == .Exited and (compile_command_result.term.Exited == 0 or (compile_command_result.term.Exited == 1 and std.mem.indexOf(u8, compile_command_result.stderr, "conflicting types") != null));
-        has_c_function_step.on_determine_fn(has_c_function_step.c_function_dependency_step, compiled_successfully, has_c_function_step.on_determine_fn_context);
+        c_dependency_step.on_determine_fn(c_dependency_step.c_function_dependency_step, compiled_successfully, c_dependency_step.on_determine_fn_context);
+    }
+
+    pub fn make(step: *std.build.Step) anyerror!void {
+        const c_dependency_step: *CDependencyTestStep = @fieldParentPtr(CDependencyTestStep, "step", step);
+        const c_checks_root_path = try std.fs.path.join(c_dependency_step.builder.allocator, &[_][]const u8{
+            c_dependency_step.builder.cache_root,
+            "c_checks",
+        });
+        std.fs.cwd().makeDir(c_checks_root_path) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        if (c_dependency_step.maybe_function) |function| {
+            try c_dependency_step.checkIfFunctionExists(function, c_checks_root_path);
+        } else if (c_dependency_step.maybe_include_header_files) |include_header_files| {
+            try c_dependency_step.checkIfIncludesExist(include_header_files, c_checks_root_path);
+        } else unreachable;
     }
 
     pub fn addFunctionAsDependencyToStep(
         builder: *std.build.Builder,
         target: std.zig.CrossTarget,
-        c_function_dependency_step: *CFunctionDependencyStep,
+        c_function_dependency_step: *WideCDependencyStep,
         comptime function: CFunctionDependency,
         on_determine_fn: OnDetermineIfFunctionExistsFn,
         on_determine_fn_context: *anyopaque,
@@ -448,22 +536,53 @@ const HasCFunctionStep = struct {
         else
             null;
 
-        var has_c_function_step = HasCFunctionStep.init(builder, target, function, maybe_include_header_files, c_function_dependency_step, on_determine_fn, on_determine_fn_context);
-        c_function_dependency_step.step.dependOn(&has_c_function_step.step);
+        var c_dependency_test_step = CDependencyTestStep.init(builder, target, function, maybe_include_header_files, c_function_dependency_step, on_determine_fn, on_determine_fn_context);
+        c_function_dependency_step.step.dependOn(&c_dependency_test_step.step);
     }
 
     const FunctionCompatContext = struct {
         maybe_compat_file_source_paths: ?[]const []const u8,
         maybe_dependencies: ?[]const CFunctionDependency,
-        c_function_dependency_step: *CFunctionDependencyStep,
+        c_function_dependency_step: *WideCDependencyStep,
         function: CFunctionDependency,
         builder: *std.build.Builder,
     };
 
+    const IncludeCompatContext = struct {
+        include_dependency_bundle: CIncludeDependencyBundle,
+        builder: *std.build.Builder,
+    };
+
+    pub fn addIncludesAsDependencyToStep(
+        builder: *std.build.Builder,
+        target: std.zig.CrossTarget,
+        source_c_function_dependency_step: *WideCDependencyStep,
+        include_dependency_bundle: CIncludeDependencyBundle,
+    ) void {
+        const compat_context = builder.allocator.create(IncludeCompatContext) catch unreachable;
+        compat_context.builder = builder;
+        compat_context.include_dependency_bundle = include_dependency_bundle;
+
+        var c_dependency_test_step = CDependencyTestStep.init(builder, target, null, include_dependency_bundle.headers, source_c_function_dependency_step, struct {
+            fn onDetermine(c_function_dependency_step: *WideCDependencyStep, has_include: bool, context: *anyopaque) void {
+                const inner_compat_context = @ptrCast(*IncludeCompatContext, @alignCast(@alignOf(*FunctionCompatContext), context));
+                var pretty_header_names = std.mem.join(inner_compat_context.builder.allocator, ", ", inner_compat_context.include_dependency_bundle.headers) catch unreachable;
+                if (has_include) {
+                    out.info("Target has {s}", .{pretty_header_names});
+                    c_function_dependency_step.c_flags.append(inner_compat_context.include_dependency_bundle.c_flag) catch unreachable;
+                } else {
+                    out.info("Target does NOT have {s}", .{pretty_header_names});
+                }
+            }
+        }.onDetermine, @ptrCast(*anyopaque, compat_context));
+
+        source_c_function_dependency_step.step.dependOn(&c_dependency_test_step.step);
+    }
+
     pub fn addFunctionAsDependencyToStepWithBackupSource(
         builder: *std.build.Builder,
         target: std.zig.CrossTarget,
-        source_c_function_dependency_step: *CFunctionDependencyStep,
+        source_c_function_dependency_step: *WideCDependencyStep,
         comptime function: CFunctionDependency,
         maybe_compat_source_files_paths: ?[]const []const u8,
         maybe_dependencies: ?[]const CFunctionDependency,
@@ -475,8 +594,8 @@ const HasCFunctionStep = struct {
         compat_context.maybe_dependencies = maybe_dependencies;
         compat_context.c_function_dependency_step = source_c_function_dependency_step;
 
-        HasCFunctionStep.addFunctionAsDependencyToStep(builder, target, source_c_function_dependency_step, function, struct {
-            fn onDetermine(c_function_dependency_step: *CFunctionDependencyStep, has_function: bool, context: *anyopaque) void {
+        CDependencyTestStep.addFunctionAsDependencyToStep(builder, target, source_c_function_dependency_step, function, struct {
+            fn onDetermine(c_function_dependency_step: *WideCDependencyStep, has_function: bool, context: *anyopaque) void {
                 const inner_compat_context = @ptrCast(*FunctionCompatContext, @alignCast(@alignOf(*FunctionCompatContext), context));
                 inner_compat_context.c_function_dependency_step.c_function_dependency_map.getPtr(inner_compat_context.function).?.maybe_target_has_symbol = has_function;
                 if (!has_function) {
@@ -485,7 +604,7 @@ const HasCFunctionStep = struct {
 
                     if (inner_compat_context.maybe_dependencies) |dependencies| {
                         for (dependencies) |dependency| {
-                            const value: CFunctionDependencyStep.DependencyInfo = inner_compat_context.c_function_dependency_step.c_function_dependency_map.get(dependency) orelse unreachable;
+                            const value: WideCDependencyStep.DependencyInfo = inner_compat_context.c_function_dependency_step.c_function_dependency_map.get(dependency) orelse unreachable;
                             if (value.maybe_target_has_symbol) |has_symbol| {
                                 if (has_symbol) {
                                     out.info("Skipping '{s}', dependency '{s}' exists!", .{ @tagName(inner_compat_context.function), @tagName(dependency) });
@@ -504,9 +623,10 @@ const HasCFunctionStep = struct {
                                 backup_compat_files_log_writer.print("'{s}', ", .{source_file}) catch unreachable;
                             }
                         }
+                        out.info("Target does NOT have '{s}', substituting with {s}", .{ @tagName(inner_compat_context.function), backup_compat_files_log.items });
+                    } else {
+                        out.info("Target does NOT have '{s}'", .{@tagName(inner_compat_context.function)});
                     }
-
-                    out.info("Target does NOT have '{s}', substituting with {s}", .{ @tagName(inner_compat_context.function), backup_compat_files_log.items });
                 } else {
                     out.info("Target has '{s}'", .{@tagName(inner_compat_context.function)});
                     const uppercase_function_name =
@@ -528,20 +648,6 @@ fn prefixStringArray(comptime prefix: []const u8, comptime input: []const []cons
     return &output;
 }
 
-// TODO(haze): Windows needs more flagjjjs
-pub fn getCCompilerFlags(
-    mode: std.builtin.Mode,
-    target: std.zig.CrossTarget,
-) []const []const u8 {
-    _ = target;
-    _ = mode;
-    const default_flags = &[_][]const u8{
-        "-Wall",
-        "-O2",
-    };
-    return default_flags;
-}
-
 pub fn addPlatformLibrariesToStep(
     step: *std.build.LibExeObjStep,
     target: std.zig.CrossTarget,
@@ -556,7 +662,7 @@ pub fn createLibCryptoStep(
     builder: *std.build.Builder,
     mode: std.builtin.Mode,
     target: std.zig.CrossTarget,
-    c_function_dependency_step: *CFunctionDependencyStep,
+    c_function_dependency_step: *WideCDependencyStep,
 ) !*DeferredLibExeObjStep {
     const raw_libcrypto_step = builder.addStaticLibrary("crypto", null);
     raw_libcrypto_step.strip = true;
@@ -1174,7 +1280,6 @@ pub fn createLibCryptoStep(
     });
 
     try libcrypto.c_source_files.appendSlice(libcrypto_base_sources);
-    try libcrypto.c_flags.appendSlice(getCCompilerFlags(mode, target));
 
     const target_is_asm_elf_x86_64 = target.getCpuArch() == .x86_64 and target.getOsTag() == .linux;
     // TODO(haze): Missimg MASM?
@@ -1265,7 +1370,7 @@ pub fn createLibSslStep(
     mode: std.builtin.Mode,
     target: std.zig.CrossTarget,
     libcrypto_library: *std.build.LibExeObjStep,
-    c_function_dependency_step: *CFunctionDependencyStep,
+    c_function_dependency_step: *WideCDependencyStep,
 ) !*DeferredLibExeObjStep {
     const raw_libssl_step = builder.addStaticLibrary("ssl", null);
     raw_libssl_step.strip = true;
@@ -1357,7 +1462,7 @@ pub fn createLibTlsStep(
     target: std.zig.CrossTarget,
     libcrypto_library: *std.build.LibExeObjStep,
     libssl_library: *std.build.LibExeObjStep,
-    c_function_dependency_step: *CFunctionDependencyStep,
+    c_function_dependency_step: *WideCDependencyStep,
 ) !*DeferredLibExeObjStep {
     const raw_libtls_step = builder.addStaticLibrary("tls", null);
     raw_libtls_step.strip = true;
@@ -1421,7 +1526,7 @@ pub fn build(b: *std.build.Builder) !void {
     const target = b.standardTargetOptions(.{});
 
     const required_c_functions = comptime std.enums.values(CFunctionDependency);
-    const required_c_function_step = CFunctionDependencyStep.init(b, required_c_functions, target);
+    const required_c_function_step = WideCDependencyStep.init(b, required_c_functions, &CIncludeDependencies, target);
 
     const libcrypto = try createLibCryptoStep(b, mode, target, required_c_function_step);
     libcrypto.lib_exe_obj_step.install();
