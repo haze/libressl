@@ -11,15 +11,15 @@ const CIncludeDependencyBundle = struct {
 pub const CIncludeDependencies = [_]CIncludeDependencyBundle{
     .{
         .headers = &[_][]const u8{"endian.h"},
-        .c_flag = "HAVE_ENDIAN_H",
+        .c_flag = "-DHAVE_ENDIAN_H",
     },
     .{
         .headers = &[_][]const u8{"err.h"},
-        .c_flag = "HAVE_ERR_H",
+        .c_flag = "-DHAVE_ERR_H",
     },
     .{
         .headers = &[_][]const u8{ "sys/types.h", "arpa/inet.h", "netinet/ip.h" },
-        .c_flag = "HAVE_NETINET_IP_H",
+        .c_flag = "-DHAVE_NETINET_IP_H",
     },
 };
 
