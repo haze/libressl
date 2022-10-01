@@ -1624,6 +1624,13 @@ pub fn linkStepWithLibreSsl(
     const libssl = try createLibSslStep(builder, mode, target, libcrypto.lib_exe_obj_step, required_c_function_step, working_directory_payload);
     const libtls = try createLibTlsStep(builder, mode, target, libcrypto.lib_exe_obj_step, libssl.lib_exe_obj_step, required_c_function_step, working_directory_payload);
 
+    const autogen_script_path = try std.fs.path.join(builder.allocator, &[_][]const u8{ libressl_source_root, "autogen.sh" });
+    const autogen_step = builder.addSystemCommand(&[_][]const u8{ "sh", autogen_script_path });
+
+    libcrypto.step.dependOn(&autogen_step.step);
+    libssl.step.dependOn(&autogen_step.step);
+    libtls.step.dependOn(&autogen_step.step);
+
     input_step.step.dependOn(&libcrypto.maybe_revert_build_root_step.?.step);
     input_step.step.dependOn(&libssl.maybe_revert_build_root_step.?.step);
     input_step.step.dependOn(&libtls.maybe_revert_build_root_step.?.step);
@@ -1643,6 +1650,8 @@ pub fn build(b: *std.build.Builder) !void {
     const required_c_functions = comptime std.enums.values(CFunctionDependency);
     const required_c_function_step = WideCDependencyStep.init(b, required_c_functions, &CIncludeDependencies, target);
 
+    const autogen_step = b.addSystemCommand(&[_][]const u8{ "sh", "autogen.sh" });
+
     const libcrypto = try createLibCryptoStep(b, mode, target, required_c_function_step, null);
     libcrypto.lib_exe_obj_step.install();
 
@@ -1651,4 +1660,8 @@ pub fn build(b: *std.build.Builder) !void {
 
     const libtls = try createLibTlsStep(b, mode, target, libcrypto.lib_exe_obj_step, libssl.lib_exe_obj_step, required_c_function_step, null);
     libtls.lib_exe_obj_step.install();
+
+    libcrypto.step.dependOn(&autogen_step.step);
+    libssl.step.dependOn(&autogen_step.step);
+    libtls.step.dependOn(&autogen_step.step);
 }
