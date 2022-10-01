@@ -492,25 +492,29 @@ const CDependencyTestStep = struct {
     }
 
     fn checkIfIncludesExist(c_dependency_step: *CDependencyTestStep, include_headers: []const []const u8, c_checks_root_path: []const u8) anyerror!void {
-        var safe_header_name_list = std.ArrayList(u8).init(c_dependency_step.builder.allocator);
-        for (include_headers) |header| {
-            var output_header: [128]u8 = undefined;
-            const safe_header_length = std.mem.replace(u8, header, std.fs.path.sep_str, "_", &output_header);
-            try safe_header_name_list.appendSlice(output_header[0..safe_header_length]);
+        var source_file = std.ArrayList(u8).init(c_dependency_step.builder.allocator);
+        var source_file_writer = source_file.writer();
+
+        for (include_headers) |include_path| {
+            try source_file_writer.print("#include <{s}>\n", .{include_path});
         }
+        try source_file_writer.writeAll(CDependencyTestStep.no_function_template_c_source);
+
+        var md5_output_buf: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+        std.crypto.hash.Md5.hash(source_file.items, &md5_output_buf, .{});
 
         const c_function_test_path = try std.fs.path.join(c_dependency_step.builder.allocator, &[_][]const u8{
             c_checks_root_path,
-            try std.fmt.allocPrint(c_dependency_step.builder.allocator, "has-{s}.c", .{safe_header_name_list.items}),
+            try std.fmt.allocPrint(c_dependency_step.builder.allocator, "{s}.c", .{std.fmt.fmtSliceHexLower(&md5_output_buf)}),
         });
-        out.info("Creating {s}...", .{c_function_test_path});
-        var file = try std.fs.cwd().createFile(c_function_test_path, .{});
-        var file_writer = file.writer();
 
-        for (include_headers) |include_path| {
-            try file_writer.print("#include <{s}>\n", .{include_path});
+        var maybe_file = std.fs.cwd().createFile(c_function_test_path, .{ .exclusive = true }) catch null;
+        if (maybe_file) |file| {
+            defer file.close();
+
+            var file_writer = file.writer();
+            try file_writer.writeAll(source_file.items);
         }
-        try file_writer.writeAll(CDependencyTestStep.no_function_template_c_source);
 
         var compile_command = std.ArrayList([]const u8).init(c_dependency_step.builder.allocator);
         compile_command.appendSlice(&[_][]const u8{
@@ -537,20 +541,32 @@ const CDependencyTestStep = struct {
     }
 
     fn checkIfFunctionExists(c_dependency_step: *CDependencyTestStep, function: CFunctionDependency, c_checks_root_path: []const u8) anyerror!void {
-        const c_function_test_path = try std.fs.path.join(c_dependency_step.builder.allocator, &[_][]const u8{
-            c_checks_root_path,
-            try std.fmt.allocPrint(c_dependency_step.builder.allocator, "has-{s}.c", .{@tagName(function)}),
-        });
-        var file = try std.fs.cwd().createFile(c_function_test_path, .{});
-        var file_writer = file.writer();
+        var source_file = std.ArrayList(u8).init(c_dependency_step.builder.allocator);
+        var source_file_writer = source_file.writer();
 
         if (c_dependency_step.maybe_include_header_files) |header_files| {
             for (header_files) |include_path| {
-                try file_writer.print("#include <{s}>\n", .{include_path});
+                try source_file_writer.print("#include <{s}>\n", .{include_path});
             }
         }
 
-        try file_writer.print(template_c_source, .{ @tagName(function), @tagName(function) });
+        try source_file_writer.print(template_c_source, .{ @tagName(function), @tagName(function) });
+
+        var md5_output_buf: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+        std.crypto.hash.Md5.hash(source_file.items, &md5_output_buf, .{});
+
+        const c_function_test_path = try std.fs.path.join(c_dependency_step.builder.allocator, &[_][]const u8{
+            c_checks_root_path,
+            try std.fmt.allocPrint(c_dependency_step.builder.allocator, "{s}.c", .{std.fmt.fmtSliceHexLower(&md5_output_buf)}),
+        });
+
+        var maybe_file = std.fs.cwd().createFile(c_function_test_path, .{ .exclusive = true }) catch null;
+        if (maybe_file) |file| {
+            defer file.close();
+
+            var file_writer = file.writer();
+            try file_writer.writeAll(source_file.items);
+        }
 
         var compile_command = std.ArrayList([]const u8).init(c_dependency_step.builder.allocator);
         compile_command.appendSlice(&[_][]const u8{
@@ -578,14 +594,7 @@ const CDependencyTestStep = struct {
 
     pub fn make(step: *std.build.Step) anyerror!void {
         const c_dependency_step: *CDependencyTestStep = @fieldParentPtr(CDependencyTestStep, "step", step);
-        const c_checks_root_path = try std.fs.path.join(c_dependency_step.builder.allocator, &[_][]const u8{
-            c_dependency_step.builder.cache_root,
-            "c_checks",
-        });
-        std.fs.cwd().makeDir(c_checks_root_path) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        const c_checks_root_path = c_dependency_step.builder.global_cache_root;
 
         if (c_dependency_step.maybe_function) |function| {
             try c_dependency_step.checkIfFunctionExists(function, c_checks_root_path);
