@@ -270,8 +270,62 @@ const WideCDependencyStep = struct {
     }
 };
 
+const ChangeBuildRootStep = struct {
+    step: std.build.Step,
+    builder: *std.build.Builder,
+
+    is_revert: bool = false,
+    maybe_new_build_root: ?[]const u8,
+    maybe_revert_step: ?*ChangeBuildRootStep,
+
+    pub fn init(
+        builder: *std.build.Builder,
+        maybe_new_build_root: ?[]const u8,
+        maybe_revert_step: ?*ChangeBuildRootStep,
+    ) *ChangeBuildRootStep {
+        const change_build_root_step = builder.allocator.create(ChangeBuildRootStep) catch unreachable;
+
+        change_build_root_step.step = std.build.Step.init(
+            .custom,
+            @typeName(@This()),
+            builder.allocator,
+            ChangeBuildRootStep.make,
+        );
+        change_build_root_step.is_revert = false;
+        change_build_root_step.maybe_new_build_root = maybe_new_build_root;
+        change_build_root_step.maybe_revert_step = maybe_revert_step;
+        change_build_root_step.builder = builder;
+
+        return change_build_root_step;
+    }
+
+    pub fn make(step: *std.build.Step) anyerror!void {
+        const change_build_root_step: *ChangeBuildRootStep = @fieldParentPtr(ChangeBuildRootStep, "step", step);
+
+        if (change_build_root_step.maybe_new_build_root) |new_build_root| {
+            if (change_build_root_step.maybe_revert_step) |revert_step| {
+                out.debug("({*}) Setting revert step at {*} to '{s}'", .{ change_build_root_step, revert_step, change_build_root_step.builder.build_root });
+                revert_step.maybe_new_build_root = try change_build_root_step.builder.allocator.dupe(u8, change_build_root_step.builder.build_root);
+                revert_step.is_revert = true;
+            }
+
+            if (change_build_root_step.is_revert) {
+                out.info("({*}) Reverting build root to '{s}'", .{ change_build_root_step, new_build_root });
+            } else {
+                out.info("({*}) Changing build root to '{s}'", .{ change_build_root_step, new_build_root });
+            }
+            change_build_root_step.builder.build_root = new_build_root;
+        } else out.err("ChangeBuildRootStep without new build root!", .{});
+    }
+};
+
 /// Exposes ArrayLists for C source files & flags and adds them to the LibExeObjStep at `make`time
 const DeferredLibExeObjStep = struct {
+    const WorkingDirectoryPayload = struct {
+        working_directory: []const u8,
+        parent_step: *std.build.Step,
+    };
+
     step: std.build.Step,
     builder: *std.build.Builder,
     lib_exe_obj_step: *std.build.LibExeObjStep,
@@ -280,6 +334,9 @@ const DeferredLibExeObjStep = struct {
     assembly_files: std.ArrayList([]const u8),
     c_source_files: std.ArrayList([]const u8),
     c_flags: std.ArrayList([]const u8),
+
+    maybe_working_directory_payload: ?WorkingDirectoryPayload,
+    maybe_revert_build_root_step: ?*ChangeBuildRootStep,
 
     c_function_dependency_step: *WideCDependencyStep,
 
@@ -294,24 +351,39 @@ const DeferredLibExeObjStep = struct {
         builder: *std.build.Builder,
         lib_exe_obj_step: *std.build.LibExeObjStep,
         c_function_dependency_step: *WideCDependencyStep,
+        maybe_working_directory_payload: ?WorkingDirectoryPayload,
     ) *DeferredLibExeObjStep {
         const deferred_step = builder.allocator.create(DeferredLibExeObjStep) catch unreachable;
 
-        deferred_step.c_source_files = std.ArrayList([]const u8).init(builder.allocator);
-        deferred_step.c_flags = std.ArrayList([]const u8).init(builder.allocator);
-        deferred_step.assembly_files = std.ArrayList([]const u8).init(builder.allocator);
-        deferred_step.include_directories = std.ArrayList([]const u8).init(builder.allocator);
-
-        deferred_step.lib_exe_obj_step = lib_exe_obj_step;
         deferred_step.step = std.build.Step.init(
             .custom,
             @typeName(@This()),
             builder.allocator,
             DeferredLibExeObjStep.make,
         );
-        deferred_step.lib_exe_obj_step.step.dependOn(&deferred_step.step);
-        deferred_step.step.dependOn(&c_function_dependency_step.step);
+        deferred_step.builder = builder;
+        deferred_step.lib_exe_obj_step = lib_exe_obj_step;
+
+        deferred_step.include_directories = std.ArrayList([]const u8).init(builder.allocator);
+        deferred_step.assembly_files = std.ArrayList([]const u8).init(builder.allocator);
+        deferred_step.c_source_files = std.ArrayList([]const u8).init(builder.allocator);
+        deferred_step.c_flags = std.ArrayList([]const u8).init(builder.allocator);
+        deferred_step.maybe_working_directory_payload = maybe_working_directory_payload;
+
         deferred_step.c_function_dependency_step = c_function_dependency_step;
+
+        deferred_step.step.dependOn(&c_function_dependency_step.step);
+        if (maybe_working_directory_payload) |working_directory_payload| {
+            const revert_build_root_step = ChangeBuildRootStep.init(builder, null, null);
+            const set_new_build_root_step = ChangeBuildRootStep.init(builder, working_directory_payload.working_directory, revert_build_root_step);
+
+            deferred_step.lib_exe_obj_step.step.dependOn(&set_new_build_root_step.step);
+            revert_build_root_step.step.dependOn(&deferred_step.lib_exe_obj_step.step);
+            deferred_step.maybe_revert_build_root_step = revert_build_root_step;
+        } else {
+            deferred_step.maybe_revert_build_root_step = null;
+        }
+        deferred_step.lib_exe_obj_step.step.dependOn(&deferred_step.step);
 
         return deferred_step;
     }
@@ -330,21 +402,21 @@ const DeferredLibExeObjStep = struct {
         deferred_lib_exe_obj_step.c_flags.appendSlice(deferred_lib_exe_obj_step.c_function_dependency_step.c_flags.items) catch unreachable;
         deferred_lib_exe_obj_step.include_directories.appendSlice(deferred_lib_exe_obj_step.c_function_dependency_step.c_include_directories.items) catch unreachable;
 
-        out.info("{s} C source files:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
+        out.debug("{s} C source files:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
         for (deferred_lib_exe_obj_step.c_source_files.items) |c_source_file| {
-            out.info("\t{s}", .{c_source_file});
+            out.debug("\t{s}", .{c_source_file});
         }
 
-        out.info("{s} C flags:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
+        out.debug("{s} C flags:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
         for (deferred_lib_exe_obj_step.c_flags.items) |c_flag| {
-            out.info("\t{s}", .{c_flag});
+            out.debug("\t{s}", .{c_flag});
         }
 
         deferred_lib_exe_obj_step.lib_exe_obj_step.addCSourceFiles(deferred_lib_exe_obj_step.c_source_files.items, deferred_lib_exe_obj_step.c_flags.items);
 
-        out.info("{s} C Include directories:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
+        out.debug("{s} C Include directories:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
         for (deferred_lib_exe_obj_step.include_directories.items) |directory| {
-            out.info("\t{s}", .{directory});
+            out.debug("\t{s}", .{directory});
             deferred_lib_exe_obj_step.lib_exe_obj_step.addIncludePath(directory);
         }
 
@@ -663,13 +735,14 @@ pub fn createLibCryptoStep(
     mode: std.builtin.Mode,
     target: std.zig.CrossTarget,
     c_function_dependency_step: *WideCDependencyStep,
+    maybe_working_directory: ?DeferredLibExeObjStep.WorkingDirectoryPayload,
 ) !*DeferredLibExeObjStep {
     const raw_libcrypto_step = builder.addStaticLibrary("crypto", null);
     raw_libcrypto_step.strip = true;
     raw_libcrypto_step.setTarget(target);
     raw_libcrypto_step.setBuildMode(mode);
     raw_libcrypto_step.linkLibC();
-    const libcrypto = DeferredLibExeObjStep.init(builder, raw_libcrypto_step, c_function_dependency_step);
+    const libcrypto = DeferredLibExeObjStep.init(builder, raw_libcrypto_step, c_function_dependency_step, maybe_working_directory);
 
     const raw_libcrypto_base_sources = [_][]const u8{
         "cpt_err.c",
@@ -1371,13 +1444,14 @@ pub fn createLibSslStep(
     target: std.zig.CrossTarget,
     libcrypto_library: *std.build.LibExeObjStep,
     c_function_dependency_step: *WideCDependencyStep,
+    maybe_working_directory: ?DeferredLibExeObjStep.WorkingDirectoryPayload,
 ) !*DeferredLibExeObjStep {
     const raw_libssl_step = builder.addStaticLibrary("ssl", null);
     raw_libssl_step.strip = true;
     raw_libssl_step.setTarget(target);
     raw_libssl_step.setBuildMode(mode);
     raw_libssl_step.linkLibC();
-    const libssl = DeferredLibExeObjStep.init(builder, raw_libssl_step, c_function_dependency_step);
+    const libssl = DeferredLibExeObjStep.init(builder, raw_libssl_step, c_function_dependency_step, maybe_working_directory);
 
     const raw_lib_ssl_source_files = [_][]const u8{
         "bio_ssl.c",
@@ -1463,13 +1537,14 @@ pub fn createLibTlsStep(
     libcrypto_library: *std.build.LibExeObjStep,
     libssl_library: *std.build.LibExeObjStep,
     c_function_dependency_step: *WideCDependencyStep,
+    maybe_working_directory: ?DeferredLibExeObjStep.WorkingDirectoryPayload,
 ) !*DeferredLibExeObjStep {
     const raw_libtls_step = builder.addStaticLibrary("tls", null);
     raw_libtls_step.strip = true;
     raw_libtls_step.setTarget(target);
     raw_libtls_step.setBuildMode(mode);
     raw_libtls_step.linkLibC();
-    const libtls = DeferredLibExeObjStep.init(builder, raw_libtls_step, c_function_dependency_step);
+    const libtls = DeferredLibExeObjStep.init(builder, raw_libtls_step, c_function_dependency_step, maybe_working_directory);
 
     const raw_lib_tls_source_files = [_][]const u8{
         "tls.c",
@@ -1521,6 +1596,37 @@ pub fn createLibTlsStep(
     return libtls;
 }
 
+pub fn linkStepWithLibreSsl(
+    builder: *std.build.Builder,
+    target: std.zig.CrossTarget,
+    mode: std.builtin.Mode,
+    libressl_source_root: []const u8,
+    input_step: *std.build.LibExeObjStep,
+) !void {
+    const required_c_functions = comptime std.enums.values(CFunctionDependency);
+    const required_c_function_step = WideCDependencyStep.init(builder, required_c_functions, &CIncludeDependencies, target);
+
+    const working_directory_payload = DeferredLibExeObjStep.WorkingDirectoryPayload{
+        .working_directory = libressl_source_root,
+        .parent_step = &input_step.step,
+    };
+
+    const libcrypto = try createLibCryptoStep(builder, mode, target, required_c_function_step, working_directory_payload);
+    const libssl = try createLibSslStep(builder, mode, target, libcrypto.lib_exe_obj_step, required_c_function_step, working_directory_payload);
+    const libtls = try createLibTlsStep(builder, mode, target, libcrypto.lib_exe_obj_step, libssl.lib_exe_obj_step, required_c_function_step, working_directory_payload);
+
+    input_step.step.dependOn(&libcrypto.maybe_revert_build_root_step.?.step);
+    input_step.step.dependOn(&libssl.maybe_revert_build_root_step.?.step);
+    input_step.step.dependOn(&libtls.maybe_revert_build_root_step.?.step);
+
+    input_step.linkLibrary(libcrypto.lib_exe_obj_step);
+    input_step.linkLibrary(libssl.lib_exe_obj_step);
+    input_step.linkLibrary(libtls.lib_exe_obj_step);
+
+    const libressl_include_path = try std.fs.path.join(builder.allocator, &[_][]const u8{ libressl_source_root, "include" });
+    input_step.addIncludePath(libressl_include_path);
+}
+
 pub fn build(b: *std.build.Builder) !void {
     const mode = b.standardReleaseOptions();
     const target = b.standardTargetOptions(.{});
@@ -1528,12 +1634,12 @@ pub fn build(b: *std.build.Builder) !void {
     const required_c_functions = comptime std.enums.values(CFunctionDependency);
     const required_c_function_step = WideCDependencyStep.init(b, required_c_functions, &CIncludeDependencies, target);
 
-    const libcrypto = try createLibCryptoStep(b, mode, target, required_c_function_step);
+    const libcrypto = try createLibCryptoStep(b, mode, target, required_c_function_step, null);
     libcrypto.lib_exe_obj_step.install();
 
-    const libssl = try createLibSslStep(b, mode, target, libcrypto.lib_exe_obj_step, required_c_function_step);
+    const libssl = try createLibSslStep(b, mode, target, libcrypto.lib_exe_obj_step, required_c_function_step, null);
     libssl.lib_exe_obj_step.install();
 
-    const libtls = try createLibTlsStep(b, mode, target, libcrypto.lib_exe_obj_step, libssl.lib_exe_obj_step, required_c_function_step);
+    const libtls = try createLibTlsStep(b, mode, target, libcrypto.lib_exe_obj_step, libssl.lib_exe_obj_step, required_c_function_step, null);
     libtls.lib_exe_obj_step.install();
 }
