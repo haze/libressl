@@ -1624,12 +1624,16 @@ pub fn linkStepWithLibreSsl(
     const libssl = try createLibSslStep(builder, mode, target, libcrypto.lib_exe_obj_step, required_c_function_step, working_directory_payload);
     const libtls = try createLibTlsStep(builder, mode, target, libcrypto.lib_exe_obj_step, libssl.lib_exe_obj_step, required_c_function_step, working_directory_payload);
 
-    const autogen_script_path = try std.fs.path.join(builder.allocator, &[_][]const u8{ libressl_source_root, "autogen.sh" });
-    const autogen_step = builder.addSystemCommand(&[_][]const u8{ "sh", autogen_script_path });
+    const autogen_step = builder.addSystemCommand(&[_][]const u8{ "sh", "autogen.sh" });
 
-    libcrypto.step.dependOn(&autogen_step.step);
-    libssl.step.dependOn(&autogen_step.step);
-    libtls.step.dependOn(&autogen_step.step);
+    const openbsd_path = std.fs.path.join(builder.allocator, &[_][]const u8{ libressl_source_root, "openbsd" });
+    const openbsd_dir_result = std.fs.cwd().openDir(openbsd_path, .{});
+    const needs_to_run_autogen = if (openbsd_dir_result) |_| false else |_| true;
+    if (needs_to_run_autogen) {
+        libcrypto.step.dependOn(&autogen_step.step);
+        libssl.step.dependOn(&autogen_step.step);
+        libtls.step.dependOn(&autogen_step.step);
+    }
 
     input_step.step.dependOn(&libcrypto.maybe_revert_build_root_step.?.step);
     input_step.step.dependOn(&libssl.maybe_revert_build_root_step.?.step);
@@ -1661,7 +1665,11 @@ pub fn build(b: *std.build.Builder) !void {
     const libtls = try createLibTlsStep(b, mode, target, libcrypto.lib_exe_obj_step, libssl.lib_exe_obj_step, required_c_function_step, null);
     libtls.lib_exe_obj_step.install();
 
-    libcrypto.step.dependOn(&autogen_step.step);
-    libssl.step.dependOn(&autogen_step.step);
-    libtls.step.dependOn(&autogen_step.step);
+    const openbsd_dir_result = std.fs.cwd().openDir("openbsd", .{});
+    const needs_to_run_autogen = if (openbsd_dir_result) |_| false else |_| true;
+    if (needs_to_run_autogen) {
+        libcrypto.step.dependOn(&autogen_step.step);
+        libssl.step.dependOn(&autogen_step.step);
+        libtls.step.dependOn(&autogen_step.step);
+    }
 }
