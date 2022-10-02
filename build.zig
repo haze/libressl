@@ -391,32 +391,42 @@ const DeferredLibExeObjStep = struct {
     pub fn make(step: *std.build.Step) anyerror!void {
         const deferred_lib_exe_obj_step: *DeferredLibExeObjStep = @fieldParentPtr(DeferredLibExeObjStep, "step", step);
 
-        out.info("{s} (C Function Dependencies) Adding {} source files, {} flags, and {} includes", .{
-            deferred_lib_exe_obj_step.lib_exe_obj_step.name,
-            deferred_lib_exe_obj_step.c_function_dependency_step.c_source_files.items.len,
-            deferred_lib_exe_obj_step.c_function_dependency_step.c_flags.items.len,
-            deferred_lib_exe_obj_step.c_function_dependency_step.c_source_files.items.len,
-        });
+        if (deferred_lib_exe_obj_step.builder.verbose) {
+            out.info("{s} (C Function Dependencies) Adding {} source files, {} flags, and {} includes", .{
+                deferred_lib_exe_obj_step.lib_exe_obj_step.name,
+                deferred_lib_exe_obj_step.c_function_dependency_step.c_source_files.items.len,
+                deferred_lib_exe_obj_step.c_function_dependency_step.c_flags.items.len,
+                deferred_lib_exe_obj_step.c_function_dependency_step.c_source_files.items.len,
+            });
+        }
 
         deferred_lib_exe_obj_step.c_source_files.appendSlice(deferred_lib_exe_obj_step.c_function_dependency_step.c_source_files.items) catch unreachable;
         deferred_lib_exe_obj_step.c_flags.appendSlice(deferred_lib_exe_obj_step.c_function_dependency_step.c_flags.items) catch unreachable;
         deferred_lib_exe_obj_step.include_directories.appendSlice(deferred_lib_exe_obj_step.c_function_dependency_step.c_include_directories.items) catch unreachable;
 
-        out.debug("{s} C source files:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
-        for (deferred_lib_exe_obj_step.c_source_files.items) |c_source_file| {
-            out.debug("\t{s}", .{c_source_file});
+        if (deferred_lib_exe_obj_step.builder.verbose) {
+            out.debug("{s} C source files:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
+            for (deferred_lib_exe_obj_step.c_source_files.items) |c_source_file| {
+                out.debug("\t{s}", .{c_source_file});
+            }
         }
 
-        out.debug("{s} C flags:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
-        for (deferred_lib_exe_obj_step.c_flags.items) |c_flag| {
-            out.debug("\t{s}", .{c_flag});
+        if (deferred_lib_exe_obj_step.builder.verbose) {
+            out.debug("{s} C flags:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
+            for (deferred_lib_exe_obj_step.c_flags.items) |c_flag| {
+                out.debug("\t{s}", .{c_flag});
+            }
         }
 
         deferred_lib_exe_obj_step.lib_exe_obj_step.addCSourceFiles(deferred_lib_exe_obj_step.c_source_files.items, deferred_lib_exe_obj_step.c_flags.items);
 
-        out.debug("{s} C Include directories:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
+        if (deferred_lib_exe_obj_step.builder.verbose) {
+            out.debug("{s} C Include directories:", .{deferred_lib_exe_obj_step.lib_exe_obj_step.name});
+            for (deferred_lib_exe_obj_step.include_directories.items) |directory| {
+                out.debug("\t{s}", .{directory});
+            }
+        }
         for (deferred_lib_exe_obj_step.include_directories.items) |directory| {
-            out.debug("\t{s}", .{directory});
             deferred_lib_exe_obj_step.lib_exe_obj_step.addIncludePath(directory);
         }
 
@@ -526,7 +536,10 @@ const CDependencyTestStep = struct {
         }) catch unreachable;
 
         const command = std.mem.join(c_dependency_step.builder.allocator, " ", compile_command.items) catch unreachable;
-        out.info("Running '{s}'", .{command});
+
+        if (c_dependency_step.builder.verbose) {
+            out.info("Running '{s}'", .{command});
+        }
 
         const compile_command_result = try std.ChildProcess.exec(.{
             .allocator = c_dependency_step.builder.allocator,
@@ -578,7 +591,10 @@ const CDependencyTestStep = struct {
         }) catch unreachable;
 
         const command = std.mem.join(c_dependency_step.builder.allocator, " ", compile_command.items) catch unreachable;
-        out.info("Running '{s}'", .{command});
+
+        if (c_dependency_step.builder.verbose) {
+            out.info("Running '{s}'", .{command});
+        }
 
         const compile_command_result = try std.ChildProcess.exec(.{
             .allocator = c_dependency_step.builder.allocator,
@@ -649,10 +665,14 @@ const CDependencyTestStep = struct {
                 const inner_compat_context = @ptrCast(*IncludeCompatContext, @alignCast(@alignOf(*FunctionCompatContext), context));
                 var pretty_header_names = std.mem.join(inner_compat_context.builder.allocator, ", ", inner_compat_context.include_dependency_bundle.headers) catch unreachable;
                 if (has_include) {
-                    out.info("Target has {s}", .{pretty_header_names});
+                    if (inner_compat_context.builder.verbose) {
+                        out.info("Target has {s}", .{pretty_header_names});
+                    }
                     c_function_dependency_step.c_flags.append(inner_compat_context.include_dependency_bundle.c_flag) catch unreachable;
                 } else {
-                    out.info("Target does NOT have {s}", .{pretty_header_names});
+                    if (inner_compat_context.builder.verbose) {
+                        out.info("Target does NOT have {s}", .{pretty_header_names});
+                    }
                 }
             }
         }.onDetermine, @ptrCast(*anyopaque, compat_context));
@@ -688,7 +708,9 @@ const CDependencyTestStep = struct {
                             const value: WideCDependencyStep.DependencyInfo = inner_compat_context.c_function_dependency_step.c_function_dependency_map.get(dependency) orelse unreachable;
                             if (value.maybe_target_has_symbol) |has_symbol| {
                                 if (has_symbol) {
-                                    out.info("Skipping '{s}', dependency '{s}' exists!", .{ @tagName(inner_compat_context.function), @tagName(dependency) });
+                                    if (inner_compat_context.builder.verbose) {
+                                        out.info("Skipping '{s}', dependency '{s}' exists!", .{ @tagName(inner_compat_context.function), @tagName(dependency) });
+                                    }
                                     return;
                                 }
                             } else @panic("Symbol DAG was misconfigured!");
@@ -704,12 +726,18 @@ const CDependencyTestStep = struct {
                                 backup_compat_files_log_writer.print("'{s}', ", .{source_file}) catch unreachable;
                             }
                         }
-                        out.info("Target does NOT have '{s}', substituting with {s}", .{ @tagName(inner_compat_context.function), backup_compat_files_log.items });
+                        if (inner_compat_context.builder.verbose) {
+                            out.info("Target does NOT have '{s}', substituting with {s}", .{ @tagName(inner_compat_context.function), backup_compat_files_log.items });
+                        }
                     } else {
-                        out.info("Target does NOT have '{s}'", .{@tagName(inner_compat_context.function)});
+                        if (inner_compat_context.builder.verbose) {
+                            out.info("Target does NOT have '{s}'", .{@tagName(inner_compat_context.function)});
+                        }
                     }
                 } else {
-                    out.info("Target has '{s}'", .{@tagName(inner_compat_context.function)});
+                    if (inner_compat_context.builder.verbose) {
+                        out.info("Target has '{s}'", .{@tagName(inner_compat_context.function)});
+                    }
                     const uppercase_function_name =
                         std.ascii.allocUpperString(inner_compat_context.builder.allocator, @tagName(inner_compat_context.function)) catch unreachable;
                     c_function_dependency_step.c_flags.append(
