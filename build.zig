@@ -304,18 +304,23 @@ const ChangeBuildRootStep = struct {
 
         if (change_build_root_step.maybe_new_build_root) |new_build_root| {
             if (change_build_root_step.maybe_revert_step) |revert_step| {
-                out.debug("({*}) Setting revert step at {*} to '{s}'", .{ change_build_root_step, revert_step, change_build_root_step.builder.build_root });
+                if (change_build_root_step.builder.verbose) {
+                    out.debug("({*}) Setting revert step at {*} to '{s}'", .{ change_build_root_step, revert_step, change_build_root_step.builder.build_root });
+                }
                 revert_step.maybe_new_build_root = try change_build_root_step.builder.allocator.dupe(u8, change_build_root_step.builder.build_root);
                 revert_step.is_revert = true;
             }
 
-            if (change_build_root_step.is_revert) {
-                out.info("({*}) Reverting build root to '{s}'", .{ change_build_root_step, new_build_root });
-            } else {
-                out.info("({*}) Changing build root to '{s}'", .{ change_build_root_step, new_build_root });
+            if (change_build_root_step.builder.verbose) {
+                if (change_build_root_step.is_revert) {
+                    out.info("({*}) Reverting build root to '{s}'", .{ change_build_root_step, new_build_root });
+                } else {
+                    out.info("({*}) Changing build root to '{s}'", .{ change_build_root_step, new_build_root });
+                }
             }
             change_build_root_step.builder.build_root = new_build_root;
-        } else out.err("ChangeBuildRootStep without new build root!", .{});
+        } else if (change_build_root_step.builder.verbose)
+            out.err("ChangeBuildRootStep without new build root!", .{});
     }
 };
 
