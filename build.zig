@@ -459,7 +459,7 @@ const CDependencyTestStep = struct {
         \\int main(void){return 0;}
     ;
 
-    const OnDetermineIfFunctionExistsFn = std.meta.FnPtr(fn (*WideCDependencyStep, bool, *anyopaque) void);
+    const OnDetermineIfFunctionExistsFn = *const fn (*WideCDependencyStep, bool, *anyopaque) void;
 
     step: std.build.Step,
     c_function_dependency_step: *WideCDependencyStep,
