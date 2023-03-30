@@ -283,12 +283,12 @@ const ChangeBuildRootStep = struct {
     builder: *std.build.Builder,
 
     is_revert: bool = false,
-    maybe_new_build_root: ?std.build.Cache.Directory,
+    maybe_new_build_root: ?[]const u8,
     maybe_revert_step: ?*ChangeBuildRootStep,
 
     pub fn init(
         builder: *std.Build,
-        maybe_new_build_root: ?std.build.Cache.Directory,
+        maybe_new_build_root: ?[]const u8,
         maybe_revert_step: ?*ChangeBuildRootStep,
     ) *ChangeBuildRootStep {
         const change_build_root_step = builder.allocator.create(ChangeBuildRootStep) catch unreachable;
@@ -316,18 +316,18 @@ const ChangeBuildRootStep = struct {
                 if (change_build_root_step.builder.verbose) {
                     out.debug("({*}) Setting revert step at {*} to '{?s}'", .{ change_build_root_step, revert_step, change_build_root_step.builder.build_root.path });
                 }
-                revert_step.maybe_new_build_root = change_build_root_step.builder.build_root;
+                revert_step.maybe_new_build_root = change_build_root_step.builder.build_root.path orelse @panic("missing build root path");
                 revert_step.is_revert = true;
             }
 
             if (change_build_root_step.builder.verbose) {
                 if (change_build_root_step.is_revert) {
-                    out.info("({*}) Reverting build root to '{?s}'", .{ change_build_root_step, new_build_root.path });
+                    out.info("({*}) Reverting build root to '{?s}'", .{ change_build_root_step, new_build_root });
                 } else {
-                    out.info("({*}) Changing build root to '{?s}'", .{ change_build_root_step, new_build_root.path });
+                    out.info("({*}) Changing build root to '{?s}'", .{ change_build_root_step, new_build_root });
                 }
             }
-            change_build_root_step.builder.build_root = new_build_root;
+            change_build_root_step.builder.build_root = try createCacheDirectory(new_build_root);
         } else if (change_build_root_step.builder.verbose)
             out.err("ChangeBuildRootStep without new build root!", .{});
     }
@@ -336,7 +336,7 @@ const ChangeBuildRootStep = struct {
 /// Exposes ArrayLists for C source files & flags and adds them to the LibExeObjStep at `make`time
 pub const DeferredLibExeObjStep = struct {
     const WorkingDirectoryPayload = struct {
-        working_directory: std.build.Cache.Directory,
+        working_directory: []const u8,
         parent_step: *std.build.Step,
     };
 
@@ -1813,5 +1813,12 @@ fn dupeDirectory(allocator: std.mem.Allocator, source: std.build.Cache.Directory
     return std.build.Cache.Directory{
         .path = maybe_path,
         .handle = source.handle,
+    };
+}
+
+fn createCacheDirectory(path: []const u8) !std.build.Cache.Directory {
+    return std.build.Cache.Directory{
+        .path = path,
+        .handle = try std.fs.cwd().openDir(path, .{}),
     };
 }
