@@ -327,7 +327,10 @@ const ChangeBuildRootStep = struct {
                     out.info("({*}) Changing build root to '{?s}'", .{ change_build_root_step, new_build_root });
                 }
             }
-            change_build_root_step.builder.build_root = try createCacheDirectory(new_build_root);
+            change_build_root_step.builder.build_root = std.build.Cache.Directory{
+                .path = new_build_root,
+                .handle = change_build_root_step.builder.build_root.handle,
+            };
         } else if (change_build_root_step.builder.verbose)
             out.err("ChangeBuildRootStep without new build root!", .{});
     }
@@ -1813,12 +1816,5 @@ fn dupeDirectory(allocator: std.mem.Allocator, source: std.build.Cache.Directory
     return std.build.Cache.Directory{
         .path = maybe_path,
         .handle = source.handle,
-    };
-}
-
-fn createCacheDirectory(path: []const u8) !std.build.Cache.Directory {
-    return std.build.Cache.Directory{
-        .path = path,
-        .handle = try std.fs.cwd().openDir(path, .{}),
     };
 }
