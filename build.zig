@@ -152,8 +152,8 @@ pub const CFunctionDependencyDarwinBackupSourceFiles = struct {
     const getentropy = [_][]const u8{"crypto/compat/getentropy_osx.c"};
 };
 
-/// Check the target for specific c functions and includes
-const WideCDependencyStep = struct {
+/// Check the target for specific C functions and includes
+pub const WideCDependencyStep = struct {
     const DependencyInfo = struct {
         maybe_target_has_symbol: ?bool,
         symbol_has_backup: bool = false,
@@ -166,24 +166,23 @@ const WideCDependencyStep = struct {
     c_include_directories: std.ArrayList([]const u8),
 
     step: std.build.Step,
-    builder: *std.build.Builder,
+    builder: *std.Build,
     c_function_dependencies: []const CFunctionDependency,
     c_include_dependencies: []const CIncludeDependencyBundle,
 
     pub fn init(
-        builder: *std.build.Builder,
+        builder: *std.Build,
         comptime c_function_dependencies: []const CFunctionDependency,
         c_include_dependencies: []const CIncludeDependencyBundle,
         target: std.zig.CrossTarget,
     ) *WideCDependencyStep {
         const dependency_step = builder.allocator.create(WideCDependencyStep) catch unreachable;
-
-        dependency_step.step = std.build.Step.init(
-            .custom,
-            @typeName(@This()),
-            builder.allocator,
-            WideCDependencyStep.make,
-        );
+        dependency_step.step = std.build.Step.init(.{
+            .id = .custom,
+            .name = @typeName(@This()),
+            .owner = builder,
+            .makeFn = WideCDependencyStep.make,
+        });
 
         inline for (c_function_dependencies) |c_function_dependency| {
             CDependencyTestStep.addFunctionAsDependencyToStepWithBackupSource(
@@ -264,9 +263,18 @@ const WideCDependencyStep = struct {
         return dependency_step;
     }
 
-    pub fn make(step: *std.build.Step) anyerror!void {
+    pub fn make(step: *std.build.Step, progress_node: *std.Progress.Node) anyerror!void {
         _ = step;
+        _ = progress_node;
         // no-op, this step is only a common dependency for other steps
+    }
+
+    pub fn mermaidDescribe(step: *std.build.Step, writer: anytype) !void {
+        const dependency_step = @fieldParentPtr(WideCDependencyStep, "step", step);
+        try writer.print("\"WideCDependencyStep:\\n{} C function depdencies\\n{} C include dependencies\"", .{
+            dependency_step.c_function_dependencies.len,
+            dependency_step.c_include_dependencies.len,
+        });
     }
 };
 
@@ -275,22 +283,22 @@ const ChangeBuildRootStep = struct {
     builder: *std.build.Builder,
 
     is_revert: bool = false,
-    maybe_new_build_root: ?[]const u8,
+    maybe_new_build_root: ?std.build.Cache.Directory,
     maybe_revert_step: ?*ChangeBuildRootStep,
 
     pub fn init(
-        builder: *std.build.Builder,
-        maybe_new_build_root: ?[]const u8,
+        builder: *std.Build,
+        maybe_new_build_root: ?std.build.Cache.Directory,
         maybe_revert_step: ?*ChangeBuildRootStep,
     ) *ChangeBuildRootStep {
         const change_build_root_step = builder.allocator.create(ChangeBuildRootStep) catch unreachable;
 
-        change_build_root_step.step = std.build.Step.init(
-            .custom,
-            @typeName(@This()),
-            builder.allocator,
-            ChangeBuildRootStep.make,
-        );
+        change_build_root_step.step = std.build.Step.init(.{
+            .id = .custom,
+            .name = @typeName(@This()),
+            .owner = builder,
+            .makeFn = ChangeBuildRootStep.make,
+        });
         change_build_root_step.is_revert = false;
         change_build_root_step.maybe_new_build_root = maybe_new_build_root;
         change_build_root_step.maybe_revert_step = maybe_revert_step;
@@ -299,23 +307,24 @@ const ChangeBuildRootStep = struct {
         return change_build_root_step;
     }
 
-    pub fn make(step: *std.build.Step) anyerror!void {
+    pub fn make(step: *std.build.Step, progress_node: *std.Progress.Node) anyerror!void {
+        _ = progress_node;
         const change_build_root_step: *ChangeBuildRootStep = @fieldParentPtr(ChangeBuildRootStep, "step", step);
 
         if (change_build_root_step.maybe_new_build_root) |new_build_root| {
             if (change_build_root_step.maybe_revert_step) |revert_step| {
                 if (change_build_root_step.builder.verbose) {
-                    out.debug("({*}) Setting revert step at {*} to '{s}'", .{ change_build_root_step, revert_step, change_build_root_step.builder.build_root });
+                    out.debug("({*}) Setting revert step at {*} to '{?s}'", .{ change_build_root_step, revert_step, change_build_root_step.builder.build_root.path });
                 }
-                revert_step.maybe_new_build_root = try change_build_root_step.builder.allocator.dupe(u8, change_build_root_step.builder.build_root);
+                revert_step.maybe_new_build_root = change_build_root_step.builder.build_root;
                 revert_step.is_revert = true;
             }
 
             if (change_build_root_step.builder.verbose) {
                 if (change_build_root_step.is_revert) {
-                    out.info("({*}) Reverting build root to '{s}'", .{ change_build_root_step, new_build_root });
+                    out.info("({*}) Reverting build root to '{?s}'", .{ change_build_root_step, new_build_root.path });
                 } else {
-                    out.info("({*}) Changing build root to '{s}'", .{ change_build_root_step, new_build_root });
+                    out.info("({*}) Changing build root to '{?s}'", .{ change_build_root_step, new_build_root.path });
                 }
             }
             change_build_root_step.builder.build_root = new_build_root;
@@ -325,9 +334,9 @@ const ChangeBuildRootStep = struct {
 };
 
 /// Exposes ArrayLists for C source files & flags and adds them to the LibExeObjStep at `make`time
-const DeferredLibExeObjStep = struct {
+pub const DeferredLibExeObjStep = struct {
     const WorkingDirectoryPayload = struct {
-        working_directory: []const u8,
+        working_directory: std.build.Cache.Directory,
         parent_step: *std.build.Step,
     };
 
@@ -353,19 +362,19 @@ const DeferredLibExeObjStep = struct {
     }
 
     pub fn init(
-        builder: *std.build.Builder,
+        builder: *std.Build,
         lib_exe_obj_step: *std.build.LibExeObjStep,
         c_function_dependency_step: *WideCDependencyStep,
         maybe_working_directory_payload: ?WorkingDirectoryPayload,
     ) *DeferredLibExeObjStep {
         const deferred_step = builder.allocator.create(DeferredLibExeObjStep) catch unreachable;
 
-        deferred_step.step = std.build.Step.init(
-            .custom,
-            @typeName(@This()),
-            builder.allocator,
-            DeferredLibExeObjStep.make,
-        );
+        deferred_step.step = std.build.Step.init(.{
+            .id = .custom,
+            .name = @typeName(@This()),
+            .owner = builder,
+            .makeFn = DeferredLibExeObjStep.make,
+        });
         deferred_step.builder = builder;
         deferred_step.lib_exe_obj_step = lib_exe_obj_step;
 
@@ -393,7 +402,8 @@ const DeferredLibExeObjStep = struct {
         return deferred_step;
     }
 
-    pub fn make(step: *std.build.Step) anyerror!void {
+    pub fn make(step: *std.build.Step, progress_node: *std.Progress.Node) anyerror!void {
+        _ = progress_node;
         const deferred_lib_exe_obj_step: *DeferredLibExeObjStep = @fieldParentPtr(DeferredLibExeObjStep, "step", step);
 
         if (deferred_lib_exe_obj_step.builder.verbose) {
@@ -439,11 +449,21 @@ const DeferredLibExeObjStep = struct {
             deferred_lib_exe_obj_step.lib_exe_obj_step.addAssemblyFile(file);
         }
     }
+
+    pub fn mermaidDescribe(step: *std.build.Step, writer: anytype) !void {
+        const lib_exe_obj_step = @fieldParentPtr(DeferredLibExeObjStep, "step", step);
+        try writer.print("\"DeferredLibExeObjStep:\\n{} C source files\\n{} Assembly source files\\n{} C flags\\n{} include directories\"", .{
+            lib_exe_obj_step.c_source_files.items.len,
+            lib_exe_obj_step.assembly_files.items.len,
+            lib_exe_obj_step.c_flags.items.len,
+            lib_exe_obj_step.include_directories.items.len,
+        });
+    }
 };
 
 /// Spawns a child `zig cc` process that checks whether or not the build target
 /// has access to a certain c function or include
-const CDependencyTestStep = struct {
+pub const CDependencyTestStep = struct {
     // hijacked from CMake source (CheckFunctionExists.c)
     const template_c_source =
         \\char {s}(void);
@@ -492,21 +512,25 @@ const CDependencyTestStep = struct {
         step.on_determine_fn = on_determine_fn;
         step.on_determine_fn_context = on_determine_fn_context;
         step.c_function_dependency_step = c_function_dependency_step;
-        step.step = std.build.Step.init(
-            .custom,
-            if (maybe_function) |function|
+        step.step = std.build.Step.init(.{
+            .id = .custom,
+            .owner = builder,
+            .name = if (maybe_function) |function|
                 std.fmt.allocPrint(builder.allocator, "has-{s}", .{@tagName(function)}) catch unreachable
             else if (maybe_include_header_files) |include_header_files| blk: {
                 var header_names = std.mem.join(builder.allocator, "-", include_header_files) catch unreachable;
                 break :blk std.fmt.allocPrint(builder.allocator, "has-{s}", .{header_names}) catch unreachable;
             } else unreachable,
-            builder.allocator,
-            CDependencyTestStep.make,
-        );
+            .makeFn = CDependencyTestStep.make,
+        });
         return step;
     }
 
-    fn checkIfIncludesExist(c_dependency_step: *CDependencyTestStep, include_headers: []const []const u8, c_checks_root_path: []const u8) anyerror!void {
+    fn checkIfIncludesExist(
+        c_dependency_step: *CDependencyTestStep,
+        include_headers: []const []const u8,
+        c_checks_root_path: []const u8,
+    ) anyerror!void {
         var source_file = std.ArrayList(u8).init(c_dependency_step.builder.allocator);
         var source_file_writer = source_file.writer();
 
@@ -558,7 +582,11 @@ const CDependencyTestStep = struct {
         c_dependency_step.on_determine_fn(c_dependency_step.c_function_dependency_step, compiled_successfully, c_dependency_step.on_determine_fn_context);
     }
 
-    fn checkIfFunctionExists(c_dependency_step: *CDependencyTestStep, function: CFunctionDependency, c_checks_root_path: []const u8) anyerror!void {
+    fn checkIfFunctionExists(
+        c_dependency_step: *CDependencyTestStep,
+        function: CFunctionDependency,
+        c_checks_root_path: []const u8,
+    ) anyerror!void {
         var source_file = std.ArrayList(u8).init(c_dependency_step.builder.allocator);
         var source_file_writer = source_file.writer();
 
@@ -613,9 +641,10 @@ const CDependencyTestStep = struct {
         c_dependency_step.on_determine_fn(c_dependency_step.c_function_dependency_step, compiled_successfully, c_dependency_step.on_determine_fn_context);
     }
 
-    pub fn make(step: *std.build.Step) anyerror!void {
+    pub fn make(step: *std.build.Step, progress_node: *std.Progress.Node) anyerror!void {
+        _ = progress_node;
         const c_dependency_step: *CDependencyTestStep = @fieldParentPtr(CDependencyTestStep, "step", step);
-        const c_checks_root_path = c_dependency_step.builder.global_cache_root;
+        const c_checks_root_path = c_dependency_step.builder.global_cache_root.path orelse @panic("no global cache root path?");
 
         if (c_dependency_step.maybe_function) |function| {
             try c_dependency_step.checkIfFunctionExists(function, c_checks_root_path);
@@ -723,7 +752,7 @@ const CDependencyTestStep = struct {
                     }
 
                     if (inner_compat_context.maybe_compat_file_source_paths) |compat_file_source_paths| {
-                        for (compat_file_source_paths) |source_file, index| {
+                        for (compat_file_source_paths, 0..) |source_file, index| {
                             c_function_dependency_step.c_source_files.append(source_file) catch unreachable;
                             if (index == compat_file_source_paths.len - 1) {
                                 backup_compat_files_log_writer.print("'{s}'", .{source_file}) catch unreachable;
@@ -752,11 +781,25 @@ const CDependencyTestStep = struct {
             }
         }.onDetermine, @ptrCast(*anyopaque, compat_context));
     }
+
+    pub fn mermaidDescribe(step: *std.build.Step, writer: anytype) !void {
+        const test_step = @fieldParentPtr(CDependencyTestStep, "step", step);
+        try writer.writeAll("\"C Dependency Test");
+        if (test_step.maybe_function) |c_function_dependency| {
+            try writer.print("\\nfunction: '{s}'", .{@tagName(c_function_dependency)});
+        }
+        if (test_step.maybe_include_header_files) |include_header_files| {
+            var joined_include_header_files = try std.mem.join(test_step.builder.allocator, ", ", include_header_files);
+            defer test_step.builder.allocator.free(joined_include_header_files);
+            try writer.print("\\nincludes: [{s}]", .{joined_include_header_files});
+        }
+        try writer.writeAll("\"");
+    }
 };
 
 fn prefixStringArray(comptime prefix: []const u8, comptime input: []const []const u8) []const []const u8 {
     comptime var output: [input.len][]const u8 = undefined;
-    inline for (input) |item, index| {
+    inline for (input, 0..) |item, index| {
         output[index] = prefix ++ item;
     }
     return &output;
@@ -779,10 +822,12 @@ pub fn createLibCryptoStep(
     c_function_dependency_step: *WideCDependencyStep,
     maybe_working_directory: ?DeferredLibExeObjStep.WorkingDirectoryPayload,
 ) !*DeferredLibExeObjStep {
-    const raw_libcrypto_step = builder.addStaticLibrary("crypto", null);
+    const raw_libcrypto_step = builder.addStaticLibrary(.{
+        .name = "crypto",
+        .target = target,
+        .optimize = mode,
+    });
     raw_libcrypto_step.strip = true;
-    raw_libcrypto_step.setTarget(target);
-    raw_libcrypto_step.setBuildMode(mode);
     raw_libcrypto_step.linkLibC();
     const libcrypto = DeferredLibExeObjStep.init(builder, raw_libcrypto_step, c_function_dependency_step, maybe_working_directory);
 
@@ -1534,10 +1579,12 @@ pub fn createLibSslStep(
     c_function_dependency_step: *WideCDependencyStep,
     maybe_working_directory: ?DeferredLibExeObjStep.WorkingDirectoryPayload,
 ) !*DeferredLibExeObjStep {
-    const raw_libssl_step = builder.addStaticLibrary("ssl", null);
+    const raw_libssl_step = builder.addStaticLibrary(.{
+        .name = "ssl",
+        .optimize = mode,
+        .target = target,
+    });
     raw_libssl_step.strip = true;
-    raw_libssl_step.setTarget(target);
-    raw_libssl_step.setBuildMode(mode);
     raw_libssl_step.linkLibC();
     const libssl = DeferredLibExeObjStep.init(builder, raw_libssl_step, c_function_dependency_step, maybe_working_directory);
 
@@ -1627,10 +1674,12 @@ pub fn createLibTlsStep(
     c_function_dependency_step: *WideCDependencyStep,
     maybe_working_directory: ?DeferredLibExeObjStep.WorkingDirectoryPayload,
 ) !*DeferredLibExeObjStep {
-    const raw_libtls_step = builder.addStaticLibrary("tls", null);
+    const raw_libtls_step = builder.addStaticLibrary(.{
+        .name = "tls",
+        .optimize = mode,
+        .target = target,
+    });
     raw_libtls_step.strip = true;
-    raw_libtls_step.setTarget(target);
-    raw_libtls_step.setBuildMode(mode);
     raw_libtls_step.linkLibC();
     const libtls = DeferredLibExeObjStep.init(builder, raw_libtls_step, c_function_dependency_step, maybe_working_directory);
 
@@ -1728,7 +1777,7 @@ pub fn linkStepWithLibreSsl(
 }
 
 pub fn build(b: *std.build.Builder) !void {
-    const mode = b.standardReleaseOptions();
+    const mode = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
 
     const required_c_functions = comptime std.enums.values(CFunctionDependency);
@@ -1752,4 +1801,17 @@ pub fn build(b: *std.build.Builder) !void {
         libssl.step.dependOn(&autogen_step.step);
         libtls.step.dependOn(&autogen_step.step);
     }
+}
+
+fn dupeDirectory(allocator: std.mem.Allocator, source: std.build.Cache.Directory) !std.build.Cache.Directory {
+    var maybe_path: ?[]const u8 = null;
+
+    if (source.path) |path| {
+        maybe_path = try allocator.dupe(u8, path);
+    }
+
+    return std.build.Cache.Directory{
+        .path = maybe_path,
+        .handle = source.handle,
+    };
 }
